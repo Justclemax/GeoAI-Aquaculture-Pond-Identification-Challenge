@@ -53,9 +53,56 @@ def load_threshold(key: str = "blend", default: float = 0.5) -> float:
     return default
 
 
+def generate_all_submissions(
+    X_test: "pd.DataFrame",
+    tag: str = "v2",
+) -> dict:
+    """Load all saved models, generate per-model and blended submissions.
+
+    Produces up to 5 CSV files:
+        {tag}_lgb.csv, {tag}_xgb.csv, {tag}_rf.csv,
+        {tag}_cb.csv  (if available),
+        {tag}_blend.csv
+    Returns a dict of {name: proba_array}.
+    """
+    from src.train import blend
+
+    model_files = {
+        "lgb": MODEL_DIR / "lgb_models.pkl",
+        "xgb": MODEL_DIR / "xgb_models.pkl",
+        "rf":  MODEL_DIR / "rf_models.pkl",
+        "cb":  MODEL_DIR / "cb_models.pkl",
+    }
+
+    probas: dict = {}
+    for name, path in model_files.items():
+        if path.exists():
+            models = load_models(path)
+            proba  = predict_proba(models, X_test)
+            probas[name] = proba
+            thr = load_threshold(name)
+            make_submission(X_test.index, proba, threshold=thr, tag=f"{tag}_{name}")
+        else:
+            print(f"  [skip] {name}: {path.name} not found")
+
+    if len(probas) < 2:
+        print("Not enough models to blend.")
+        return probas
+
+    # equal-weight blend of whatever models are available
+    names = list(probas.keys())
+    weights_map = {"lgb": 3, "xgb": 2, "rf": 2, "cb": 2}
+    weights = [weights_map.get(n, 1) for n in names]
+    blended = blend([probas[n] for n in names], weights=weights)
+    thr = load_threshold("blend")
+    make_submission(X_test.index, blended, threshold=thr, tag=f"{tag}_blend")
+    probas["blend"] = blended
+
+    return probas
+
+
 if __name__ == "__main__":
     from src.features import prepare_Xy
-    from src.train import blend
 
     print("Engineering features …")
     _, _, X_test = prepare_Xy(
@@ -63,13 +110,6 @@ if __name__ == "__main__":
         str(DATA_DIR / "Test.csv"),
     )
 
-    lgb_models = load_models(MODEL_DIR / "lgb_models.pkl")
-    xgb_models = load_models(MODEL_DIR / "xgb_models.pkl")
-
-    lgb_proba = predict_proba(lgb_models, X_test)
-    xgb_proba = predict_proba(xgb_models, X_test)
-    blended   = blend([lgb_proba, xgb_proba], weights=[0.6, 0.4])
-
-    threshold = load_threshold("blend")
-    make_submission(X_test.index, blended, threshold=threshold, tag="lgb_xgb_blend_v2")
+    print("\nGenerating submissions for all saved models …")
+    generate_all_submissions(X_test, tag="v2")
     print("Done.")

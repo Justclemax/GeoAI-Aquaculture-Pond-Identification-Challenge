@@ -9,6 +9,9 @@ from sklearn.model_selection import StratifiedKFold
 
 import lightgbm as lgb
 import xgboost as xgb
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
 
 try:
     import catboost as cb
@@ -60,6 +63,16 @@ XGB_PARAMS = {
     "random_state": 42,
     "n_jobs": -1,
     "verbosity": 0,
+}
+
+RF_PARAMS = {
+    "n_estimators": 500,
+    "max_depth": 20,
+    "min_samples_leaf": 5,
+    "max_features": "sqrt",
+    "class_weight": "balanced",
+    "random_state": 42,
+    "n_jobs": -1,
 }
 
 CB_PARAMS = {
@@ -134,11 +147,18 @@ def _fit(X_tr, y_tr, X_val, y_val, model_type: str, params: dict | None):
             eval_set=[(X_val, y_val)],
             verbose=False,
         )
+    elif model_type == "rf":
+        p = {**RF_PARAMS, **p}
+        # RF does not handle NaN → median imputation via Pipeline
+        model = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("rf", RandomForestClassifier(**p)),
+        ])
+        model.fit(X_tr, y_tr)
     elif model_type == "cb":
         if not HAS_CATBOOST:
             raise ImportError("catboost not installed — run: uv add catboost")
         p = {**CB_PARAMS, **p}
-        # CatBoost handles NaN natively
         pool_tr  = cb.Pool(X_tr,  y_tr,  feature_names=list(X_tr.columns))
         pool_val = cb.Pool(X_val, y_val, feature_names=list(X_val.columns))
         model = cb.CatBoostClassifier(**p)
@@ -199,21 +219,32 @@ if __name__ == "__main__":
     print("\n=== XGBoost ===")
     xgb_oof, xgb_models, xgb_thr = cross_validate(X_train, y_train, model_type="xgb")
 
-    # blend OOF then find optimal threshold on blend
-    blended_oof = blend([lgb_oof, xgb_oof], weights=[0.6, 0.4])
+    print("\n=== Random Forest ===")
+    rf_oof, rf_models, rf_thr = cross_validate(X_train, y_train, model_type="rf")
+
+    # blend OOF of all three with weights; RF contributes diversity
+    oof_list    = [lgb_oof, xgb_oof, rf_oof]
+    w_list      = [3, 2, 2]
+    blended_oof = blend(oof_list, weights=w_list)
     best_thr, best_f1 = find_best_threshold(y_train.values, blended_oof)
-    print(f"\n=== Blended OOF (threshold=0.5) ===")
+    print(f"\n=== Blended OOF LGB+XGB+RF (threshold=0.5) ===")
     print_scores(y_train.values, blended_oof)
-    print(f"\n=== Blended OOF (optimal threshold={best_thr:.3f}) ===")
+    print(f"\n=== Blended OOF LGB+XGB+RF (optimal threshold={best_thr:.3f}) ===")
     print_scores(y_train.values, blended_oof, threshold=best_thr)
 
     save_models(lgb_models, "lgb")
     save_models(xgb_models, "xgb")
+    save_models(rf_models,  "rf")
 
-    # persist optimal threshold for predict.py
+    # persist optimal thresholds for predict.py
     thr_path = MODEL_DIR / "thresholds.json"
     thr_path.parent.mkdir(parents=True, exist_ok=True)
     with open(thr_path, "w") as f:
-        json.dump({"blend": best_thr, "lgb": lgb_thr, "xgb": xgb_thr}, f, indent=2)
+        json.dump({
+            "blend": best_thr,
+            "lgb": lgb_thr,
+            "xgb": xgb_thr,
+            "rf":  rf_thr,
+        }, f, indent=2)
     print(f"Thresholds saved → {thr_path}")
     print("Done.")
