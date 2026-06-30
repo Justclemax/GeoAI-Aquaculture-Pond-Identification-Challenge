@@ -1,0 +1,38 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="rioxarray" />
+          <option value="pystac" />
+          <option value="pystac_client" />
+          <option value="planetary_computer" />
+          <option value="odc-stac" />
+          <option value="shapely" />
+          <option value="rasterio" />
+          <option value="tqdm" />
+          <option value="pandas" />
+          <option value="xarray" />
+          <option value="matplotlib" />
+          <option value="geopandas" />
+          <option value="seaborn" />
+          <option value="scikit-learn" />
+          <option value="netCDF4" />
+          <option value="adlfs" />
+          <option value="zarr" />
+          <option value="dask" />
+          <option value="numcodecs" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyStubPackagesAdvertiser" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="scipy" />
+          <option value="pandas" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
