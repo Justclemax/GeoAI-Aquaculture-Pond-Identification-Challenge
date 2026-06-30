@@ -94,6 +94,29 @@ def _sar_rvi(vh: np.ndarray, vv: np.ndarray) -> np.ndarray:
 # Temporal aggregation
 # ---------------------------------------------------------------------------
 
+def _temporal_trend(mat: np.ndarray) -> np.ndarray:
+    """Linear slope of index values over the valid timesteps.
+
+    Positive = signal increasing over the year, negative = decreasing.
+    Returns NaN for samples with fewer than 3 valid observations.
+    """
+    n_samples, n_times = mat.shape
+    t = np.arange(1, n_times + 1, dtype=float)
+    slopes = np.full(n_samples, np.nan)
+    for i in range(n_samples):
+        valid = ~np.isnan(mat[i])
+        n = int(valid.sum())
+        if n >= 3:
+            x = t[valid]
+            y = mat[i, valid]
+            xm = x.mean()
+            ym = y.mean()
+            denom = float(np.sum((x - xm) ** 2))
+            if denom > EPS:
+                slopes[i] = float(np.sum((x - xm) * (y - ym)) / denom)
+    return slopes
+
+
 def _temporal_stats(mat: np.ndarray, prefix: str) -> dict:
     """Compute mean, std, min, max, range over valid (non-NaN) timesteps."""
     n_valid = np.sum(~np.isnan(mat), axis=1)
@@ -174,6 +197,28 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     # spectral index temporal stats
     for name, mat in indices.items():
         features.update(_temporal_stats(mat, name))
+
+    # temporal trend (slope) for key indices
+    for name in ["ndwi", "ndvi", "awei_sh", "sar_diff"]:
+        features[f"{name}_trend"] = _temporal_trend(indices[name])
+    features["vh_trend"] = _temporal_trend(vh)
+    features["vv_trend"] = _temporal_trend(vv)
+
+    # coefficient of variation — permanent water has low CV
+    _cv_sources = {**raw_bands, **indices}  # indices overwrite raw_bands keys if same name
+    for name in ["ndwi", "ndvi", "awei_sh", "vh", "vv"]:
+        if name in _cv_sources:
+            with np.errstate(all="ignore"):
+                mn = np.nanmean(_cv_sources[name], axis=1)
+                sd = np.nanstd(_cv_sources[name], axis=1)
+            features[f"{name}_cv"] = sd / (np.abs(mn) + EPS)
+
+    # interaction: high NDWI + low NDVI → permanent open water
+    ndwi_mean = features["ndwi_mean"]
+    ndvi_mean = features["ndvi_mean"]
+    features["water_score"]  = ndwi_mean - ndvi_mean          # high for ponds
+    features["pond_signal"]  = ndwi_mean * (1.0 - ndvi_mean)  # product interaction
+    features["vh_ndwi"]      = features["vh_mean"] * ndwi_mean  # SAR × water index
 
     # per-timestep values for raw SAR (always available, critical for model)
     for t in range(N_TIMESTEPS):

@@ -1,13 +1,14 @@
 """Generate submission file from trained models."""
 
+import json
 import pickle
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "raw"
-MODEL_DIR = Path(__file__).parent.parent / "models"
+DATA_DIR   = Path(__file__).parent.parent / "data" / "raw"
+MODEL_DIR  = Path(__file__).parent.parent / "models"
 SUBMIT_DIR = Path(__file__).parent.parent / "data" / "submissions"
 
 
@@ -39,6 +40,19 @@ def make_submission(
     return sub
 
 
+def load_threshold(key: str = "blend", default: float = 0.5) -> float:
+    """Load the OOF-optimised threshold saved by train.py."""
+    path = MODEL_DIR / "thresholds.json"
+    if path.exists():
+        with open(path) as f:
+            data = json.load(f)
+        thr = float(data.get(key, default))
+        print(f"Loaded threshold [{key}] = {thr:.4f}")
+        return thr
+    print(f"No thresholds.json found, using default={default}")
+    return default
+
+
 if __name__ == "__main__":
     from src.features import prepare_Xy
     from src.train import blend
@@ -54,7 +68,8 @@ if __name__ == "__main__":
 
     lgb_proba = predict_proba(lgb_models, X_test)
     xgb_proba = predict_proba(xgb_models, X_test)
-    blended = blend([lgb_proba, xgb_proba], weights=[0.6, 0.4])
+    blended   = blend([lgb_proba, xgb_proba], weights=[0.6, 0.4])
 
-    make_submission(X_test.index, blended, tag="lgb_xgb_blend")
+    threshold = load_threshold("blend")
+    make_submission(X_test.index, blended, threshold=threshold, tag="lgb_xgb_blend_v2")
     print("Done.")

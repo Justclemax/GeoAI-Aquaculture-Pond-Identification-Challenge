@@ -1,6 +1,5 @@
-"""Training pipeline with LightGBM, XGBoost and ensemble blending."""
+"""Training pipeline with LightGBM, XGBoost (+ optional CatBoost) and ensemble blending."""
 
-import json
 import pickle
 from pathlib import Path
 
@@ -11,7 +10,13 @@ from sklearn.model_selection import StratifiedKFold
 import lightgbm as lgb
 import xgboost as xgb
 
-from src.evaluate import print_scores, zindi_score
+try:
+    import catboost as cb
+    HAS_CATBOOST = True
+except ImportError:
+    HAS_CATBOOST = False
+
+from src.evaluate import find_best_threshold, print_scores, zindi_score
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "raw"
 MODEL_DIR = Path(__file__).parent.parent / "models"
@@ -57,6 +62,21 @@ XGB_PARAMS = {
     "verbosity": 0,
 }
 
+CB_PARAMS = {
+    "iterations": 2000,
+    "learning_rate": 0.02,
+    "depth": 6,
+    "l2_leaf_reg": 3.0,
+    "bagging_temperature": 0.5,
+    "random_strength": 1.0,
+    "border_count": 128,
+    "auto_class_weights": "Balanced",
+    "eval_metric": "AUC",
+    "random_seed": 42,
+    "verbose": False,
+    "thread_count": -1,
+}
+
 N_SPLITS = 5
 EARLY_STOPPING = 100
 
@@ -88,9 +108,12 @@ def cross_validate(
         print(f"  Fold {fold}/{n_splits}  Zindi={score:.4f}")
         models.append(model)
 
-    print("\nOOF overall:")
+    best_thr, best_f1 = find_best_threshold(y.values, oof)
+    print(f"\nOOF (threshold=0.5):")
     print_scores(y.values, oof)
-    return oof, models
+    print(f"\nOOF (optimal threshold={best_thr:.3f}):")
+    print_scores(y.values, oof, threshold=best_thr)
+    return oof, models, best_thr
 
 
 def _fit(X_tr, y_tr, X_val, y_val, model_type: str, params: dict | None):
@@ -111,12 +134,23 @@ def _fit(X_tr, y_tr, X_val, y_val, model_type: str, params: dict | None):
             eval_set=[(X_val, y_val)],
             verbose=False,
         )
+    elif model_type == "cb":
+        if not HAS_CATBOOST:
+            raise ImportError("catboost not installed — run: uv add catboost")
+        p = {**CB_PARAMS, **p}
+        # CatBoost handles NaN natively
+        pool_tr  = cb.Pool(X_tr,  y_tr,  feature_names=list(X_tr.columns))
+        pool_val = cb.Pool(X_val, y_val, feature_names=list(X_val.columns))
+        model = cb.CatBoostClassifier(**p)
+        model.fit(pool_tr, eval_set=pool_val, early_stopping_rounds=EARLY_STOPPING)
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
     return model
 
 
 def _predict_proba(model, X: pd.DataFrame, model_type: str) -> np.ndarray:
+    if model_type == "cb":
+        return model.predict_proba(X)[:, 1]
     return model.predict_proba(X)[:, 1]
 
 
@@ -149,6 +183,7 @@ def load_models(path: Path) -> list:
 
 
 if __name__ == "__main__":
+    import json
     from src.features import prepare_Xy
 
     print("Loading and engineering features …")
@@ -159,16 +194,26 @@ if __name__ == "__main__":
     print(f"X_train: {X_train.shape}, X_test: {X_test.shape}")
 
     print("\n=== LightGBM ===")
-    lgb_oof, lgb_models = cross_validate(X_train, y_train, model_type="lgb")
+    lgb_oof, lgb_models, lgb_thr = cross_validate(X_train, y_train, model_type="lgb")
 
     print("\n=== XGBoost ===")
-    xgb_oof, xgb_models = cross_validate(X_train, y_train, model_type="xgb")
+    xgb_oof, xgb_models, xgb_thr = cross_validate(X_train, y_train, model_type="xgb")
 
-    # blend
+    # blend OOF then find optimal threshold on blend
     blended_oof = blend([lgb_oof, xgb_oof], weights=[0.6, 0.4])
-    print("\nBlended OOF:")
+    best_thr, best_f1 = find_best_threshold(y_train.values, blended_oof)
+    print(f"\n=== Blended OOF (threshold=0.5) ===")
     print_scores(y_train.values, blended_oof)
+    print(f"\n=== Blended OOF (optimal threshold={best_thr:.3f}) ===")
+    print_scores(y_train.values, blended_oof, threshold=best_thr)
 
     save_models(lgb_models, "lgb")
     save_models(xgb_models, "xgb")
+
+    # persist optimal threshold for predict.py
+    thr_path = MODEL_DIR / "thresholds.json"
+    thr_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(thr_path, "w") as f:
+        json.dump({"blend": best_thr, "lgb": lgb_thr, "xgb": xgb_thr}, f, indent=2)
+    print(f"Thresholds saved → {thr_path}")
     print("Done.")
